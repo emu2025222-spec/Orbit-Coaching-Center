@@ -1,7 +1,10 @@
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
-const { get } = require('../config/db')
+const { getMongoDB } = require('../config/mongodb')
 const { asyncHandler, send } = require('../utils/api')
+
+const USERS = 'users'
+const STUDENTS = 'students'
 
 const publicUser = (user) => ({
   id: user.id,
@@ -14,24 +17,130 @@ const publicUser = (user) => ({
   photo_path: user.photo_path || null,
 })
 
-const signToken = (user) => jwt.sign({ id: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '12h' })
+const signToken = (user) =>
+  jwt.sign(
+    {
+      id: user.id,
+      role: user.role,
+    },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: '12h',
+    }
+  )
 
 const login = asyncHandler(async (req, res) => {
-  const { login: loginValue, password, role } = req.body
-  if (!loginValue || !password) return send(res, 422, null, 'Login and password are required.')
+  const db = getMongoDB()
 
-  const user = await get(`SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.password_hash,
-      s.id AS student_id, s.student_code, s.batch, s.photo_path
-    FROM users u LEFT JOIN students s ON s.user_id = u.id
-    WHERE lower(u.email) = lower(?) OR lower(s.student_code) = lower(?)`, [loginValue.trim(), loginValue.trim()])
+  const {
+    login: loginValue,
+    password,
+    role,
+  } = req.body
 
-  if (!user || !user.is_active || (role && user.role !== role)) return send(res, 401, null, 'Invalid login credentials.')
-  const valid = await bcrypt.compare(password, user.password_hash)
-  if (!valid) return send(res, 401, null, 'Invalid login credentials.')
+  if (!loginValue || !password) {
+    return send(
+      res,
+      422,
+      null,
+      'Login and password are required.'
+    )
+  }
 
-  return send(res, 200, { token: signToken(user), user: publicUser(user) }, 'Login successful.')
+  const value = loginValue.trim()
+
+  const escapedValue = value.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    '\\$&'
+  )
+
+  const loginRegex = new RegExp(
+    `^${escapedValue}$`,
+    'i'
+  )
+
+  // Search by email first
+  let user = await db.collection(USERS).findOne({
+    email: loginRegex,
+  })
+
+  // If not found, search by student code
+  if (!user) {
+    const student = await db.collection(STUDENTS).findOne({
+      student_code: loginRegex,
+    })
+
+    if (student) {
+      user = await db.collection(USERS).findOne({
+        id: Number(student.user_id),
+      })
+
+      if (user) {
+        user.student_id = student.id
+        user.student_code = student.student_code
+        user.batch = student.batch
+        user.photo_path = student.photo_path
+      }
+    }
+  } else if (user.role === 'student') {
+    const student = await db.collection(STUDENTS).findOne({
+      user_id: Number(user.id),
+    })
+
+    if (student) {
+      user.student_id = student.id
+      user.student_code = student.student_code
+      user.batch = student.batch
+      user.photo_path = student.photo_path
+    }
+  }
+
+  if (
+    !user ||
+    !user.is_active ||
+    (role && user.role !== role)
+  ) {
+    return send(
+      res,
+      401,
+      null,
+      'Invalid login credentials.'
+    )
+  }
+
+  const valid = await bcrypt.compare(
+    password,
+    user.password_hash
+  )
+
+  if (!valid) {
+    return send(
+      res,
+      401,
+      null,
+      'Invalid login credentials.'
+    )
+  }
+
+  return send(
+    res,
+    200,
+    {
+      token: signToken(user),
+      user: publicUser(user),
+    },
+    'Login successful.'
+  )
 })
 
-const me = asyncHandler(async (req, res) => send(res, 200, { user: publicUser(req.user) }))
+const me = asyncHandler(async (req, res) =>
+  send(res, 200, {
+    user: publicUser(req.user),
+  })
+)
 
-module.exports = { login, me, publicUser }
+module.exports = {
+  login,
+  me,
+  publicUser,
+}

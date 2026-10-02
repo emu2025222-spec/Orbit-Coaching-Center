@@ -1,25 +1,83 @@
 const jwt = require('jsonwebtoken')
-const { get } = require('../config/db')
+const { getMongoDB } = require('../config/mongodb')
 const { send, asyncHandler } = require('../utils/api')
 
 const protect = asyncHandler(async (req, res, next) => {
-  const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null
-  if (!token) return send(res, 401, null, 'Authentication token is required.')
+  const token = req.headers.authorization?.startsWith('Bearer ')
+    ? req.headers.authorization.slice(7)
+    : null
+
+  if (!token) {
+    return send(
+      res,
+      401,
+      null,
+      'Authentication token is required.'
+    )
+  }
 
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET)
-    const user = await get(`SELECT u.id, u.email, u.full_name, u.role, u.is_active, s.id AS student_id, s.student_code, s.batch, s.photo_path
-      FROM users u LEFT JOIN students s ON s.user_id = u.id WHERE u.id = ?`, [payload.id])
-    if (!user || !user.is_active) return send(res, 401, null, 'This account is no longer active.')
-    req.user = user
+    const payload = jwt.verify(
+      token,
+      process.env.JWT_SECRET
+    )
+
+    const db = getMongoDB()
+
+    const user = await db.collection('users').findOne({
+      id: Number(payload.id),
+    })
+
+    if (!user || !user.is_active) {
+      return send(
+        res,
+        401,
+        null,
+        'This account is no longer active.'
+      )
+    }
+
+    let student = null
+
+    if (user.role === 'student') {
+      student = await db.collection('students').findOne({
+        user_id: Number(user.id),
+      })
+    }
+
+    req.user = {
+      id: user.id,
+      email: user.email,
+      full_name: user.full_name,
+      role: user.role,
+      is_active: user.is_active,
+      student_id: student?.id || null,
+      student_code: student?.student_code || null,
+      batch: student?.batch || null,
+      photo_path: student?.photo_path || null,
+    }
+
     next()
   } catch (error) {
-    return send(res, 401, null, 'Invalid or expired authentication token.')
+    return send(
+      res,
+      401,
+      null,
+      'Invalid or expired authentication token.'
+    )
   }
 })
 
 const allow = (...roles) => (req, res, next) => {
-  if (!roles.includes(req.user.role)) return send(res, 403, null, 'You do not have permission to perform this action.')
+  if (!roles.includes(req.user.role)) {
+    return send(
+      res,
+      403,
+      null,
+      'You do not have permission to perform this action.'
+    )
+  }
+
   next()
 }
 
@@ -44,13 +102,22 @@ const studentScope = (req, res, next) => {
     )
   }
 
-  if (req.user.role === 'student' && !target) {
-    req.studentId = req.user.student_id
+  if (
+    req.user.role === 'student' &&
+    !target
+  ) {
+    req.studentId =
+      req.user.student_id
   } else {
-    req.studentId = target || null
+    req.studentId =
+      target || null
   }
 
   next()
 }
 
-module.exports = { protect, allow, studentScope }
+module.exports = {
+  protect,
+  allow,
+  studentScope,
+}
